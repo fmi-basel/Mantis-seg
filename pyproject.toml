@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools", "wheel", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+
+[tool.setuptools_scm]
+write_to = "src/mantis_seg/_version.py"
+
+[tool.pytest.ini_options]
+log_cli = "True"
+log_cli_level = "INFO"
+
+[tool.coverage.run]
+source = ["src/mantis_seg"]
