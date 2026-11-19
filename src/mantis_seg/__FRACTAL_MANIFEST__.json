@@ -1,0 +1,605 @@
+{
+  "manifest_version": "2",
+  "task_list": [
+    {
+      "name": "Segment by Intensity Threshold",
+      "category": "Segmentation",
+      "modality": "HCS",
+      "tags": [
+        "Classical segmentation",
+        "3D"
+      ],
+      "docs_info": "### Purpose\n- Performs **full 3D object segmentation** of raw intensity images using intensity thresholding.\n- Combines two intensity channels, applies **Gaussian smoothing** and **Canny edge detection** for refined masks.\n- Filters out debris and neighboring objects by selecting the **largest connected component** within a masked region.\n- Outputs a new 3D segmentation label image and an updated masking ROI table.\n\n### Outputs\n- A **new 3D label image** stored in the dataset, with refined object segmentation.\n- A corresponding **bounding-box ROI table** saved as `{output_label_name}_ROI_table`.\n\n### Limitations\n- Requires pre-segmented 2D MIP-based ROI regions as input for masking.\n- Supports intensity thresholding with either **Otsu's method** or a user-defined threshold.\n- Assumes consistent image resolution and pixel intensities across channels.\n- Regions with extreme intensity variations or overlapping objects may require manual parameter tuning for optimal results.\n",
+      "type": "compound",
+      "executable_non_parallel": "fractal/init_select_many_rounds.py",
+      "executable_parallel": "fractal/segment_by_intensity_threshold.py",
+      "meta_non_parallel": {
+        "cpus_per_task": 1,
+        "mem": 1000
+      },
+      "meta_parallel": {
+        "cpus_per_task": 4,
+        "mem": 16000
+      },
+      "args_schema_non_parallel": {
+        "additionalProperties": false,
+        "properties": {
+          "zarr_urls": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Zarr Urls",
+            "type": "array",
+            "description": "List of paths or urls to the individual OME-Zarr image to be processed. (standard argument for Fractal tasks, managed by Fractal server)."
+          },
+          "zarr_dir": {
+            "title": "Zarr Dir",
+            "type": "string",
+            "description": "path of the directory where the new OME-Zarrs will be created. Not used by this task. (standard argument for Fractal tasks, managed by Fractal server)."
+          },
+          "select_acquisitions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Select Acquisitions",
+            "type": "array",
+            "description": "List of rounds to which correction should be applied, list of integers."
+          }
+        },
+        "required": [
+          "zarr_urls",
+          "zarr_dir",
+          "select_acquisitions"
+        ],
+        "type": "object",
+        "title": "InitSelectManyRounds"
+      },
+      "args_schema_parallel": {
+        "$defs": {
+          "ChannelInputModel": {
+            "description": "A channel which is specified by either `wavelength_id` or `label`.",
+            "properties": {
+              "wavelength_id": {
+                "title": "Wavelength Id",
+                "type": "string",
+                "description": "Unique ID for the channel wavelength, e.g. `A01_C01`. Can only be specified if label is not set."
+              },
+              "label": {
+                "title": "Label",
+                "type": "string",
+                "description": "Name of the channel. Can only be specified if wavelength_id is not set."
+              }
+            },
+            "title": "ChannelInputModel",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "zarr_url": {
+            "title": "Zarr Url",
+            "type": "string",
+            "description": "Path or url to the individual OME-Zarr image to be processed. Refers to the zarr_url of the reference acquisition. (standard argument for Fractal tasks, managed by Fractal server)."
+          },
+          "init_args": {
+            "title": "Init Args",
+            "type": "object",
+            "description": "Init arguments for Fractal server."
+          },
+          "label_name": {
+            "default": "org",
+            "title": "Label Name",
+            "type": "string",
+            "description": "Label name of segmentation (usually based on 2D MIP) that identifies objects in image."
+          },
+          "new_label_name": {
+            "default": "org3d",
+            "title": "New Label Name",
+            "type": "string",
+            "description": "Desired name for new output label. The corresponding ROI table will be saved as {output_label_name}_ROI_table."
+          },
+          "roi_table": {
+            "default": "org_ROI_table",
+            "title": "Roi Table",
+            "type": "string",
+            "description": "Name of the ROI table that corresponds to label_name. This table is used to iterate over objects and load object regions."
+          },
+          "channel_1": {
+            "$ref": "#/$defs/ChannelInputModel",
+            "title": "Channel 1",
+            "description": "Channel of raw image used for thresholding. Requires either `wavelength_id` (e.g. `A01_C01`) or `label` (e.g. `DAPI`)."
+          },
+          "background_channel_1": {
+            "default": 800,
+            "title": "Background Channel 1",
+            "type": "integer",
+            "description": "Pixel intensity value of background to subtract from channel 1 raw image."
+          },
+          "maximum_channel_1": {
+            "title": "Maximum Channel 1",
+            "type": "integer",
+            "description": "Maximum pixel intensity value that channel 1 image is rescaled to."
+          },
+          "weight_channel_1": {
+            "default": 0.5,
+            "title": "Weight Channel 1",
+            "type": "number",
+            "description": "Float specifying weight of channel 1 image. Channels are combined as (weight_channel_1 * ch1_raw) + (weight_channel_2 * ch2_raw). When both weights are 0.5, channels are averaged. If no second channel is provided, this parameter is ignored."
+          },
+          "combine_with_channel_2": {
+            "default": false,
+            "title": "Combine With Channel 2",
+            "type": "boolean",
+            "description": "if True, a second channel can be added. The Channel 1 and 2 images are combined using weights specified with weight_channel_1 and weight_channel_2, and thresholding is performed using this combined image."
+          },
+          "channel_2": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/ChannelInputModel"
+              }
+            ],
+            "title": "Channel 2",
+            "description": "Channel of second raw image to be combined with channel 1 image. Requires either `wavelength_id` (e.g. `A02_C02`) or `label` (e.g. `BCAT`)."
+          },
+          "background_channel_2": {
+            "title": "Background Channel 2",
+            "type": "integer",
+            "description": "Pixel intensity value of background to subtract from channel 2 raw image."
+          },
+          "maximum_channel_2": {
+            "title": "Maximum Channel 2",
+            "type": "integer",
+            "description": "Maximum pixel intensity value that channel 1 image is rescaled to."
+          },
+          "weight_channel_2": {
+            "default": 0.5,
+            "title": "Weight Channel 2",
+            "type": "number",
+            "description": "Float specifying weight of channel 2 image. Channels are combined as (weight_channel_1 * ch1_raw) + (weight_channel_2 * ch2_raw)"
+          },
+          "otsu_threshold": {
+            "default": true,
+            "title": "Otsu Threshold",
+            "type": "boolean",
+            "description": "if True, the threshold for each region is calculated with the Otsu method. This threshold method is more robust to intensity variation between objects compared to intensity_threshold."
+          },
+          "otsu_weight": {
+            "default": 1.0,
+            "title": "Otsu Weight",
+            "type": "number",
+            "description": "Scale calculated Otsu threhsold by this value. Values lower than 1 (e.g. 0.9) reduce Otsu threshold (e.g. by 10 %) to include lower-intensity pixels in thresholding."
+          },
+          "intensity_threshold": {
+            "default": -1,
+            "title": "Intensity Threshold",
+            "type": "integer",
+            "description": "Integer that specifies threshold intensity value to binarize image. Must be supplied if Otsu thresholding is not used. Intensities below this value will be set to 0, intensities above are set to 1. The specified value should correspond to intensity range of raw image (e.g. for 16-bit images, 0-65535). Recommended threshold value is above image background level and below dimmest regions of image, particularly at deeper z-depth."
+          },
+          "gaussian_sigma_raw_image": {
+            "default": 30,
+            "title": "Gaussian Sigma Raw Image",
+            "type": "number",
+            "description": "Float that specifies sigma (standard deviation, in pixels) for 3D Gaussian kernel used for blurring of raw intensity image prior to thresholding and edge detection. Higher values correspond to more blurring that reduce holes in thresholded image. Recommended range 10-40."
+          },
+          "gaussian_sigma_threshold_image": {
+            "default": 20,
+            "title": "Gaussian Sigma Threshold Image",
+            "type": "number",
+            "description": "Float that specifies sigma (standard deviation, in pixels) for 2D Gaussian kernel used for blurring each z-slice of thresholded binary image prior to edge detection. Higher values correspond to more blurring and smoother surface edges. Recommended range 10-30."
+          },
+          "small_objects_diameter": {
+            "default": 30,
+            "title": "Small Objects Diameter",
+            "type": "number",
+            "description": "Float that specifies the approximate diameter, in pixels and at level=0, of debris in the image. This value is used to filter out small objects using skimage.morphology.remove_small_objects."
+          },
+          "expand_by_pixels": {
+            "default": 20,
+            "title": "Expand By Pixels",
+            "type": "integer",
+            "description": "Expand initial threshold mask by this number of pixels and fill holes. Mask is subsequently dilated and returned to original size. This step serves to fill holes in dim regions. Higher values lead to more holes filled, but neighboring objects or debris may become fused."
+          },
+          "contour_value_outer": {
+            "default": 0.8,
+            "title": "Contour Value Outer",
+            "type": "number",
+            "description": "Float in range [0,1]. This is the value used to draw contour line around object. Higher values result in tighter fit of edge mask to intensity image."
+          },
+          "linear_z_illumination_correction": {
+            "default": false,
+            "title": "Linear Z Illumination Correction",
+            "type": "boolean",
+            "description": "Set to True if linear z illumination correction is desired. Iterate over z-slices to apply correction."
+          },
+          "start_z_slice": {
+            "default": 40,
+            "title": "Start Z Slice",
+            "type": "integer",
+            "description": "Z-slice number at which to begin to apply linear correction, e.g. slice 40 if image stack has 100 slices."
+          },
+          "m_slope": {
+            "default": 0.015,
+            "title": "M Slope",
+            "type": "number",
+            "description": "Slope factor of illumination correction. Higher values have more extreme correction. This value sets the multiplier for a given z-slice by formula m_slope * (i - start_z_slice) + 1, where i is the current z-slice in iterator."
+          },
+          "segment_lumen": {
+            "default": false,
+            "title": "Segment Lumen",
+            "type": "boolean",
+            "description": "if True, lumen (assumed to be negative space in object) will also be segmented. In this case, three label maps are output: outer contour (epithelial surface) with holes filled, inner contour (lumen), and the epithelial mask (difference between outer and inner regions)."
+          },
+          "contour_value_inner": {
+            "default": 0.8,
+            "title": "Contour Value Inner",
+            "type": "number",
+            "description": "Float in range [0,1]. This is the value used to draw contour line around lumen of object. Higher values result in tighter fit of edge mask to intensity image."
+          }
+        },
+        "required": [
+          "zarr_url",
+          "init_args",
+          "channel_1",
+          "maximum_channel_1"
+        ],
+        "type": "object",
+        "title": "SegmentByIntensityThreshold"
+      },
+      "docs_link": "https://github.com/fmi-basel/Mantis-seg"
+    },
+    {
+      "name": "Expand Labels",
+      "category": "Image Processing",
+      "tags": [
+        "2D",
+        "3D"
+      ],
+      "docs_info": "### Purpose\n- Expands segmented **labels** in 2D or 3D images **without overlap**.\n- Supports expansion by a fixed pixel distance or dynamically based on **label size**.\n- Optionally masks expanded labels using **parent objects** to prevent spillover.\n- Outputs an expanded label image and preserves non-overlapping object boundaries.\n\n### Outputs\n- A new **expanded label image** saved with an `_expanded` suffix.\n\n### Limitations\n- If masking by parent is enabled, the parent object label image must be provided.\n- Expansion beyond object boundaries may be clipped, depending on the surrounding labels and image dimensions.\n",
+      "type": "parallel",
+      "executable_parallel": "fractal/expand_labels.py",
+      "meta_parallel": {
+        "cpus_per_task": 4,
+        "mem": 16000
+      },
+      "args_schema_parallel": {
+        "additionalProperties": false,
+        "properties": {
+          "zarr_url": {
+            "title": "Zarr Url",
+            "type": "string",
+            "description": "Path or url to the individual OME-Zarr image to be processed."
+          },
+          "label_name_to_expand": {
+            "title": "Label Name To Expand",
+            "type": "string",
+            "description": "Label name of segmentation to be expanded."
+          },
+          "new_label_name": {
+            "title": "New Label Name",
+            "type": "string",
+            "description": "Optionally new name for expanded label. If left None, default is {label_name_to_expand}_expanded"
+          },
+          "parent_roi_table_name": {
+            "default": "",
+            "title": "Parent Roi Table Name",
+            "type": "string",
+            "description": "Name of the ROI table used to iterate over objects and load object regions. If a table of type \"roi_table\" is passed, e.g. well_ROI_table, all objects for each region in the table will be loaded and expanded simultaneously. If a table of type \"masking_roi_table\" is passed, e.g. a segmentation ROI table, the task iterates over these objects and loads only the children (i.e. label_name_to_expand) that belong to the parent object."
+          },
+          "mask_input": {
+            "default": false,
+            "title": "Mask Input",
+            "type": "boolean",
+            "description": "If True, input non-expanded label is masked by parent label prior to expansion. If True, this selects children belonging to a given parent. However, this may crop input in cases where parent mask segmentation is not perfect."
+          },
+          "mask_output": {
+            "default": false,
+            "title": "Mask Output",
+            "type": "boolean",
+            "description": "If True, expanded label is masked by parent label. Only used if masking_label_map is provided. Recommended to set as True, to avoid overwriting of children labels between neighboring parents. However, it may lead to expanded results to be cropped by parent mask; in this case, the parent mask can first be expanded."
+          },
+          "expand_by_pixels": {
+            "title": "Expand By Pixels",
+            "type": "integer",
+            "description": "Default expansion parameter. Integer value for pixel distance to expand by."
+          },
+          "calculate_image_based_expansion_distance": {
+            "default": false,
+            "title": "Calculate Image Based Expansion Distance",
+            "type": "boolean",
+            "description": "If true, overrides any set expand_by_pixels value, and expansion distance is calculated based on the average label size in loaded region. In this case, expandby_factor must be supplied."
+          },
+          "expand_by_factor": {
+            "title": "Expand By Factor",
+            "type": "number",
+            "description": "Only used if calculate_image_based_expansion_distance is True. Multiplier that specifies pixels by which to expand each label. Float in range [0, 1 or higher], e.g. 0.2 means that 20% of mean equivalent diameter of labels in region is used."
+          },
+          "fill_holes": {
+            "default": false,
+            "title": "Fill Holes",
+            "type": "boolean",
+            "description": "if True, the label image prior to expansion has holes filled by iterating over slices. Useful for filling lumens in segmentation."
+          },
+          "expand_in_z": {
+            "default": false,
+            "title": "Expand In Z",
+            "type": "boolean",
+            "description": "if True, uses different 3d expansion function to expand isotropically in z,y,x. Use with caution - anisotropic voxel spacing is not supported."
+          }
+        },
+        "required": [
+          "zarr_url",
+          "label_name_to_expand"
+        ],
+        "type": "object",
+        "title": "ExpandLabels"
+      },
+      "docs_link": "https://github.com/fmi-basel/Mantis-seg"
+    },
+    {
+      "name": "Fuse Touching Labels",
+      "category": "Image Processing",
+      "tags": [
+        "2D"
+      ],
+      "docs_info": "### Purpose\n- Fuse touching labels in segmentation images, in 2D or 3D. Connected components are identified during labeling\n    based on the connectivity argument. For a more detailed explanation of 1- or 2- connectivity, see documentation\n    of skimage.measure.label() function. When set to None (default), full connectivity (ndim of input array) is used.\n\n- Input is segmentation image with 0 value for background. Anything above 0 is assumed to be a labeled object.\n    Touching labels are labeled in numerically increasing order starting from 1 to n, where n is the number of\n    connected components (objects) identified.\n\n- This task has been tested for fusion of 2D MIP segmentation. Since fusion must occur on the full well numpy\n    array loaded into memory, performance may be poor for large 3D arrays.\n\n### Outputs\n- The fused label image is saved as a new label in zarr, with name {label_name_to_fuse}_fused.\n- The new ROI table for the fused label image is saved as a masking ROI table, with name\n    {label_name_to_fuse}_fused_ROI_table.\n",
+      "type": "parallel",
+      "executable_parallel": "fractal/fuse_touching_labels.py",
+      "meta_parallel": {
+        "cpus_per_task": 4,
+        "mem": 16000
+      },
+      "args_schema_parallel": {
+        "additionalProperties": false,
+        "properties": {
+          "zarr_url": {
+            "title": "Zarr Url",
+            "type": "string",
+            "description": "Path or url to the individual OME-Zarr image to be processed."
+          },
+          "label_name_to_fuse": {
+            "title": "Label Name To Fuse",
+            "type": "string",
+            "description": "Label name of segmentation to be fused."
+          },
+          "new_label_name": {
+            "title": "New Label Name",
+            "type": "string",
+            "description": "Optionally new name for expanded label. If left None, default is {label_name_to_fuse}_fused"
+          },
+          "connectivity": {
+            "title": "Connectivity",
+            "type": "integer",
+            "description": "Connectivity determines which elements of the output array belong to the structure and thus considered neighbors of the central element during fusion. Accepted values are ranging from 1 to input.ndim. If None, defaults to a squared connectivity = 1, where only connected center faces are considered neighbors (diagonally connected components are considered separated). Maximum connectivity is at input.ndim, when any face, edge, or vertex is considered a neighbor. Follows default behavior of dask_image.ndmeasure.label, with structuring element generated using scipy.ndimage.generate_binary_structure(input.ndim, connectivity)."
+          },
+          "level": {
+            "default": 0,
+            "title": "Level",
+            "type": "integer",
+            "description": "Defaults to full resolution level 0. However, this may lead to out of memory for fusion of large 3D arrays. In this case, setting to a higher pyramid level (e.g. 4) will perform fusion using low-resolution pyramid. The level-0 array will then be relabelled according to this mapping. Note that low-res fusion may yield different results than full-res fusion, since fine spacing between neighboring objects may be lost in the low-level representation!"
+          },
+          "fill_holes": {
+            "default": false,
+            "title": "Fill Holes",
+            "type": "boolean",
+            "description": "if True, the new label image (after fusion) has holes filled by iterating over z-slices. Useful for filling any gaps between fused labels."
+          }
+        },
+        "required": [
+          "zarr_url",
+          "label_name_to_fuse"
+        ],
+        "type": "object",
+        "title": "FuseTouchingLabels"
+      },
+      "docs_link": "https://github.com/fmi-basel/Mantis-seg"
+    },
+    {
+      "name": "Convert 3D Segmentation to MIP",
+      "input_types": {
+        "is_3D": true
+      },
+      "output_types": {
+        "is_3D": false
+      },
+      "tags": [
+        "Mixed modality",
+        "3D to 2D workflows"
+      ],
+      "docs_info": "### Purpose\n- Convert 3D segmentations into 2D maximum intensity projection (MIP) segmentations\n- Creates MIP along z axis\n- Useful for generating 2D MIP for multiplexed registration\n\n### Outputs\n- A new **MIP label image** saved as a label in the `_mip` 2D zarr.\n- A new **masking ROI table** saved as `{new_label_name}_ROI_table` in the 2D zarr.\n\n### Limitations\n- If multiple labels overlap along z, they are collapsed into a single value corresponding to the higher label id number (max) of the labels.\n",
+      "type": "parallel",
+      "executable_parallel": "fractal/convert_3d_to_mip.py",
+      "meta_parallel": {
+        "cpus_per_task": 2,
+        "mem": 8000
+      },
+      "args_schema_parallel": {
+        "additionalProperties": false,
+        "properties": {
+          "zarr_url": {
+            "title": "Zarr Url",
+            "type": "string",
+            "description": "Path or url to the individual OME-Zarr image to be processed. (standard argument for Fractal tasks, managed by Fractal server)."
+          },
+          "label_name": {
+            "title": "Label Name",
+            "type": "string",
+            "description": "Name of the label to copy from 3D OME-Zarr to 2D OME-Zarr"
+          },
+          "level": {
+            "default": "0",
+            "title": "Level",
+            "type": "string",
+            "description": "Level of the 3D OME-Zarr label to copy from. Valid choices are \"0\", \"1\", etc. (depending on which levels are available in the OME-Zarr label)."
+          },
+          "new_label_name": {
+            "title": "New Label Name",
+            "type": "string",
+            "description": "Optionally overwriting the name of the label in the 2D OME-Zarr"
+          },
+          "plate_suffix": {
+            "default": "_mip",
+            "title": "Plate Suffix",
+            "type": "string",
+            "description": "Suffix that needs to be added to 3D OME-Zarr name to generate the path to the 2D OME-Zarr. If the 2D OME-Zarr is \"/path/to/my_plate_mip.zarr/B/03/0\" and the 3D OME-Zarr is located in \"/path/to/my_plate.zarr/B/03/0\", the correct suffix is \"_mip\"."
+          },
+          "image_suffix_3D_to_remove": {
+            "title": "Image Suffix 3D To Remove",
+            "type": "string",
+            "description": "If the image name between 2D & 3D don't match, this is the suffix that should be removed from the 3D image. If the 3D image is in \"/path/to/my_plate.zarr/B/03/ 0_registered\" and the 2D image is in \"/path/to/my_plate_mip.zarr/ B/03/0\", the value should be \"_registered\""
+          },
+          "image_suffix_2D_to_add": {
+            "title": "Image Suffix 2D To Add",
+            "type": "string",
+            "description": "If the image name between 2D & 3D don't match, this is the suffix that should be added to the 2D image. If the 3D image is in \"/path/to/my_plate.zarr/B/03/0\" and the 2D image is in \"/path/to/my_plate_mip.zarr/B/03/0_illum_corr\", the value should be \"_illum_corr\"."
+          },
+          "overwrite": {
+            "default": false,
+            "title": "Overwrite",
+            "type": "boolean",
+            "description": "If `True`, overwrite existing label and ROI tables in the 3D OME-Zarr"
+          }
+        },
+        "required": [
+          "zarr_url",
+          "label_name"
+        ],
+        "type": "object",
+        "title": "Convert3dToMip"
+      },
+      "docs_link": "https://github.com/fmi-basel/Mantis-seg"
+    },
+    {
+      "name": "Build Label Image",
+      "category": "Image Processing",
+      "tags": [
+        "Mixed modality"
+      ],
+      "docs_info": "### Purpose\n- Clean up incomplete label image on disk\n- Build pyramid structure on disk for label image\n- Make masking ROI table based on label image\n- This is useful if a segmentation task was run but failed with OoM error at pyramid building step.\n- Works on both 2D and 3D zarr arrays\n\n### Outputs\n- Pyramid structure for label image (optional), matching chunking and number of levels of parent zarr array\n- Masking ROI table (optional)\n\n### Limitations\n- Only works for label images, not image arrays\n",
+      "type": "parallel",
+      "executable_parallel": "fractal/build_label_image.py",
+      "meta_parallel": {
+        "cpus_per_task": 4,
+        "mem": 36000
+      },
+      "args_schema_parallel": {
+        "additionalProperties": false,
+        "properties": {
+          "zarr_url": {
+            "title": "Zarr Url",
+            "type": "string",
+            "description": "Path or url to the individual OME-Zarr image to be processed."
+          },
+          "label_name": {
+            "title": "Label Name",
+            "type": "string",
+            "description": "Label name of segmentation to be processed."
+          },
+          "build_zarr_pyramid": {
+            "default": true,
+            "title": "Build Zarr Pyramid",
+            "type": "boolean",
+            "description": "If True, build pyramid for input label_name."
+          },
+          "compute_masking_roi_table": {
+            "default": true,
+            "title": "Compute Masking Roi Table",
+            "type": "boolean",
+            "description": "If True, compute masking ROI table and save."
+          },
+          "new_table_name": {
+            "title": "New Table Name",
+            "type": "string",
+            "description": "Optional name for ROI table. If left None, default is {label_name}_ROI_table."
+          }
+        },
+        "required": [
+          "zarr_url",
+          "label_name"
+        ],
+        "type": "object",
+        "title": "BuildLabelImage"
+      },
+      "docs_link": "https://github.com/fmi-basel/Mantis-seg"
+    },
+    {
+      "name": "Cleanup 3D Child Labels",
+      "category": "Image Processing",
+      "tags": [
+        "3D"
+      ],
+      "docs_info": "### Purpose\n- Clean up debris in label images\n- Remove labels that are smaller than specified volume threshold\n\n### Outputs\n- New label image and corresponding ROI table for cleaned objects\n\n### Limitations\n- Only performs volume-based filtering for now\n",
+      "type": "parallel",
+      "executable_parallel": "fractal/cleanup_3d_child_labels.py",
+      "meta_parallel": {
+        "cpus_per_task": 4,
+        "mem": 12000
+      },
+      "args_schema_parallel": {
+        "additionalProperties": false,
+        "properties": {
+          "zarr_url": {
+            "title": "Zarr Url",
+            "type": "string",
+            "description": "Path or url to the individual OME-Zarr image to be processed. Refers to the zarr_url of the reference acquisition. (standard argument for Fractal tasks, managed by Fractal server)."
+          },
+          "child_label_name": {
+            "default": "nuc",
+            "title": "Child Label Name",
+            "type": "string",
+            "description": "Label name child objects (e.g. nuclei) to be cleaned."
+          },
+          "parent_roi_table_name": {
+            "default": "org_ROI_table_linked",
+            "title": "Parent Roi Table Name",
+            "type": "string",
+            "description": "Name of the ROI table used to iterate over objects and load object regions. This is the ROI table that corresponds to the parent_label_name objects."
+          },
+          "new_child_label_name": {
+            "title": "New Child Label Name",
+            "type": "string",
+            "description": "New label name for cleaned child objects. If left None, default is {child_label_name}_cleaned."
+          },
+          "filter_children_by_volume": {
+            "default": true,
+            "title": "Filter Children By Volume",
+            "type": "boolean",
+            "description": "if True, performing volume filtering of children to remove objects smaller than specified volume_filter_threshold."
+          },
+          "child_volume_filter_threshold": {
+            "default": 0.05,
+            "title": "Child Volume Filter Threshold",
+            "type": "number",
+            "description": "Multiplier that specifies cutoff for volumes below which nuclei are filtered out, float in range [0,1], e.g. 0.05 means that 5% of median of nuclear volume distribution in a given object is used as cutoff. Default 0.05."
+          },
+          "repair_uint16_clipped_labels": {
+            "default": false,
+            "title": "Repair Uint16 Clipped Labels",
+            "type": "boolean",
+            "description": "If child labels were clipped to uint16 during segmentation and there were more than 2^16 labels, the label id's above 65535 get clipped. If True, these clipped values get remapped to monotonically increasing values 65536, 65537, etc."
+          },
+          "remove_nonsurface_labels": {
+            "default": false,
+            "title": "Remove Nonsurface Labels",
+            "type": "boolean",
+            "description": "If true, remove child labels that are not on organoid surface, as determined by Annotate_mesh_by_child_features\" task. The values to be removed are loaded from disk."
+          },
+          "force_output_type_to_uint32": {
+            "default": false,
+            "title": "Force Output Type To Uint32",
+            "type": "boolean",
+            "description": "If True, force the dtype of the output cleaned label to be uint32. If False, the dtype of input child label image is used."
+          }
+        },
+        "required": [
+          "zarr_url"
+        ],
+        "type": "object",
+        "title": "Cleanup3dChildLabels"
+      },
+      "docs_link": "https://github.com/fmi-basel/Mantis-seg"
+    }
+  ],
+  "has_args_schemas": true,
+  "args_schema_version": "pydantic_v2",
+  "authors": "Nicole Repina, Enrico Tagliavini, Tim-Oliver Buchholz, Joel Luethi"
+}

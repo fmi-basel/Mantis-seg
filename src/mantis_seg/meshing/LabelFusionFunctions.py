@@ -28,12 +28,10 @@ from skimage.segmentation import expand_labels
 from mantis_seg.features.FeatureFunctions import mesh_equivalent_diameter
 from mantis_seg.linking.NucleiLinkingFunctions import remove_labels
 from mantis_seg.meshing.FilterFunctions import (
-    add_xy_pad,
     calculate_mean_volume,
     filter_small_sizes_per_round,
     load_border_values,
     remove_border,
-    remove_xy_pad,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,36 +96,6 @@ def expand_3d_labels(label_image: np.ndarray, distance: int):
     # Use indexing to map the nearest label values
     expanded[mask] = label_image[tuple(idx[mask] for idx in indices)]
     return expanded
-
-
-def fuse_labels(seg, expandby_factor):
-    """
-    Expand labels in 3D image by 2D z-slice based on the mean volume, fuse and fill holes,
-    and erode back to original size.
-    """
-    # Initialize empty array
-    seg_binary = np.zeros_like(seg)
-
-    # Determine the expansion amount (in pixels) based on the mean diameter of 3D nuclei or cells in object
-    expandby_pix = get_expandby_pixels(seg, expandby_factor)
-
-    # Iterate over each zslice in image
-    for i, zslice in enumerate(seg):
-        # Pad image
-        zslice = np.pad(zslice, pad_width=expandby_pix)
-        # Expand labels in x,y
-        zslice = expand_labels(zslice, expandby_pix)
-        # Fill holes and binarize area (return boolean)
-        zslice = binary_fill_holes(zslice)
-        # Revert the expansion (i.e. erode down to original size)
-        # Erode by half of the expanded pixels since disk(1) has a radius of 1, i.e. diameter of 2
-        eroded = binary_erosion(
-            zslice, disk(1), iterations=expandby_pix
-        )  # returns binary image, max val 1
-        # remove padding
-        seg_binary[i, :, :] = remove_border(eroded, pad_width=expandby_pix)
-
-    return seg_binary, expandby_pix
 
 
 def fill_holes_by_slice(seg):
@@ -441,52 +409,6 @@ def select_largest_component(label_image, connectivity=3):
     largest_component = cc == largest_label
 
     return largest_component.astype(np.uint8), roi_count
-
-
-def run_label_fusion(
-    seg,
-    parent_seg,
-    expandby_factor,
-    sigma,
-    pixmeta,
-    canny_threshold,
-    xy_padwidth,
-    mask_by_parent=False,
-):
-    """
-    Main function for running label fusion. Used in Surface Mesh Multiscale task to generate organoid label from
-    single-cell segmentation.
-    Note that padding is not removed unless mask_by_parent=True. This way meshes can be generated from nicely
-    smoothened images. Pad must be removed after meshing is complete.
-    """
-    seg_binary, expandby_pix = fuse_labels(seg, expandby_factor)
-
-    # Add padding equal to sigma in xy dimensions so that blur can spread beyond image edge.
-    seg_binary = add_xy_pad(seg_binary, xy_padwidth)
-
-    blurred, anisotropic_sigma = anisotropic_gaussian_blur(seg_binary, sigma, pixmeta)
-    edges_canny, padded_zslice_count = find_edges(
-        blurred, canny_threshold, canny_threshold, expandby_pix, segment_lumen=False
-    )
-
-    # Filter by organoid label image from 2D segmentation (converted to 3D)
-    # This removes debris that is far from organoid (only in xy)
-    # and at least partially removes touching neighboring organoids
-    if mask_by_parent:
-        # First remove padding so that image size matches parent mask
-        edges_canny = remove_xy_pad(edges_canny, xy_padwidth)
-        edges_canny = edges_canny * parent_seg
-
-    # Discard small disconnected components
-    contour, roi_count = select_largest_component(edges_canny)
-
-    return (
-        contour,
-        expandby_pix,
-        anisotropic_sigma,
-        padded_zslice_count,
-        roi_count,
-    )
 
 
 def run_expansion(
